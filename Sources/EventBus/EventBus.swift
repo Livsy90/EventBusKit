@@ -33,15 +33,15 @@ public actor EventBus {
         receivers.forEach { $0(event) }
     }
 
-    /// Publishes an event from a detached task.
+    /// Publishes an event from a new task.
     ///
     /// - Returns: The created task so callers can cancel or await completion.
     @discardableResult
-    public nonisolated func publishDetached<Event: EventBusEvent>(
+    public nonisolated func publishAsync<Event: EventBusEvent>(
         _ event: Event,
         priority: TaskPriority? = nil
     ) -> Task<Void, Never> {
-        Task.detached(priority: priority) { [self] in
+        Task(priority: priority) { [self] in
             await self.publish(event)
         }
     }
@@ -49,67 +49,66 @@ public actor EventBus {
     /// Subscribes `owner` to events of inferred type `Event`.
     ///
     /// The subscription is removed automatically when `owner` is deallocated.
-    @discardableResult
     public func subscribe<Owner: AnyObject & Sendable, Event: EventBusEvent>(
         owner: Owner,
         delivery: Delivery = .postingTask,
         handler: @escaping @Sendable (Owner, Event) -> Void
-    ) -> SubscriptionToken {
-        subscribe(owner: owner, to: Event.self, delivery: delivery, handler: handler)
+    ) {
+        _ = subscribeInternal(owner: owner, to: Event.self, delivery: delivery, handler: handler)
     }
 
     /// Subscribes `owner` with an async handler to events of inferred type `Event`.
     ///
     /// - Parameter taskPriority: Optional priority used for spawned handler tasks.
-    @discardableResult
     public func subscribe<Owner: AnyObject & Sendable, Event: EventBusEvent>(
         owner: Owner,
         delivery: Delivery = .postingTask,
         taskPriority: TaskPriority? = nil,
         handler: @escaping @Sendable (Owner, Event) async -> Void
-    ) -> SubscriptionToken {
+    ) {
         subscribe(owner: owner, to: Event.self, delivery: delivery, taskPriority: taskPriority, handler: handler)
     }
 
     /// Subscribes `owner` to a specific event type using an event-only handler.
-    @discardableResult
     public func subscribe<Owner: AnyObject & Sendable, Event: EventBusEvent>(
         owner: Owner,
         to eventType: Event.Type = Event.self,
         delivery: Delivery = .postingTask,
         handler: @escaping @Sendable (Event) -> Void
-    ) -> SubscriptionToken {
+    ) {
         subscribe(owner: owner, to: eventType, delivery: delivery) { _, event in
             handler(event)
         }
     }
 
     /// Subscribes `owner` to a specific event type using an async event-only handler.
-    @discardableResult
     public func subscribe<Owner: AnyObject & Sendable, Event: EventBusEvent>(
         owner: Owner,
         to eventType: Event.Type = Event.self,
         delivery: Delivery = .postingTask,
+        taskPriority: TaskPriority? = nil,
         handler: @escaping @Sendable (Event) async -> Void
-    ) -> SubscriptionToken {
-        subscribe(owner: owner, to: eventType, delivery: delivery) { _, event in
-            Task {
-                await handler(event)
-            }
+    ) {
+        subscribe(
+            owner: owner,
+            to: eventType,
+            delivery: delivery,
+            taskPriority: taskPriority
+        ) { _, event in
+            await handler(event)
         }
     }
 
     /// Subscribes `owner` to a specific event type using an async `(owner, event)` handler.
     ///
     /// - Parameter taskPriority: Optional priority used for spawned handler tasks.
-    @discardableResult
     public func subscribe<Owner: AnyObject & Sendable, Event: EventBusEvent>(
         owner: Owner,
         to eventType: Event.Type = Event.self,
         delivery: Delivery = .postingTask,
         taskPriority: TaskPriority? = nil,
         handler: @escaping @Sendable (Owner, Event) async -> Void
-    ) -> SubscriptionToken {
+    ) {
         subscribe(owner: owner, to: eventType, delivery: delivery) { owner, event in
             Task(priority: taskPriority) {
                 await handler(owner, event)
@@ -118,13 +117,19 @@ public actor EventBus {
     }
 
     /// Subscribes `owner` to a specific event type.
-    ///
-    /// - Important: The returned token can be used for early cancellation.
-    @discardableResult
     public func subscribe<Owner: AnyObject & Sendable, Event: EventBusEvent>(
         owner: Owner,
         to eventType: Event.Type = Event.self,
         delivery: Delivery = .postingTask,
+        handler: @escaping @Sendable (Owner, Event) -> Void
+    ) {
+        _ = subscribeInternal(owner: owner, to: eventType, delivery: delivery, handler: handler)
+    }
+
+    private func subscribeInternal<Owner: AnyObject & Sendable, Event: EventBusEvent>(
+        owner: Owner,
+        to eventType: Event.Type,
+        delivery: Delivery,
         handler: @escaping @Sendable (Owner, Event) -> Void
     ) -> SubscriptionToken {
         let eventKey = ObjectIdentifier(eventType)
@@ -150,30 +155,31 @@ public actor EventBus {
     }
 
     /// Subscribes once and automatically cancels after the first matching event.
-    @discardableResult
     public func subscribeOnce<Owner: AnyObject & Sendable, Event: EventBusEvent>(
         owner: Owner,
         to eventType: Event.Type = Event.self,
         delivery: Delivery = .postingTask,
         handler: @escaping @Sendable (Owner, Event) -> Void
-    ) -> SubscriptionToken {
+    ) {
         let tokenBox = TokenBox()
-        let token = subscribe(owner: owner, to: eventType, delivery: delivery) { owner, event in
+        let onceGate = OnceGate()
+        let token = subscribeInternal(owner: owner, to: eventType, delivery: delivery) { owner, event in
+            guard onceGate.consumeFirstDelivery() else {
+                return
+            }
             tokenBox.cancelAndClear()
             handler(owner, event)
         }
         tokenBox.set(token)
-        return token
     }
 
     /// Subscribes once with an event-only handler.
-    @discardableResult
     public func subscribeOnce<Owner: AnyObject & Sendable, Event: EventBusEvent>(
         owner: Owner,
         to eventType: Event.Type = Event.self,
         delivery: Delivery = .postingTask,
         handler: @escaping @Sendable (Event) -> Void
-    ) -> SubscriptionToken {
+    ) {
         subscribeOnce(owner: owner, to: eventType, delivery: delivery) { _, event in
             handler(event)
         }
@@ -182,32 +188,33 @@ public actor EventBus {
     /// Subscribes once with an async event-only handler.
     ///
     /// - Parameter taskPriority: Optional priority used for spawned handler tasks.
-    @discardableResult
     public func subscribeOnce<Owner: AnyObject & Sendable, Event: EventBusEvent>(
         owner: Owner,
         to eventType: Event.Type = Event.self,
         delivery: Delivery = .postingTask,
         taskPriority: TaskPriority? = nil,
         handler: @escaping @Sendable (Event) async -> Void
-    ) -> SubscriptionToken {
-        subscribeOnce(owner: owner, to: eventType, delivery: delivery) { _, event in
-            Task(priority: taskPriority) {
-                await handler(event)
-            }
+    ) {
+        subscribeOnce(
+            owner: owner,
+            to: eventType,
+            delivery: delivery,
+            taskPriority: taskPriority
+        ) { _, event in
+            await handler(event)
         }
     }
 
     /// Subscribes once with an async `(owner, event)` handler.
     ///
     /// - Parameter taskPriority: Optional priority used for spawned handler tasks.
-    @discardableResult
     public func subscribeOnce<Owner: AnyObject & Sendable, Event: EventBusEvent>(
         owner: Owner,
         to eventType: Event.Type = Event.self,
         delivery: Delivery = .postingTask,
         taskPriority: TaskPriority? = nil,
         handler: @escaping @Sendable (Owner, Event) async -> Void
-    ) -> SubscriptionToken {
+    ) {
         subscribeOnce(owner: owner, to: eventType, delivery: delivery) { owner, event in
             Task(priority: taskPriority) {
                 await handler(owner, event)
@@ -227,22 +234,17 @@ public actor EventBus {
         let tokenBox = TokenBox()
         tokenBox.retain(owner: owner)
 
-        var continuationRef: AsyncStream<Event>.Continuation?
-        let stream = AsyncStream<Event>(bufferingPolicy: bufferingPolicy) { continuation in
-            continuationRef = continuation
-            continuation.onTermination = { @Sendable _ in
+        // AsyncStream invokes its builder synchronously.
+        var continuation: AsyncStream<Event>.Continuation?
+        let stream = AsyncStream<Event>(bufferingPolicy: bufferingPolicy) { streamContinuation in
+            continuation = streamContinuation
+            streamContinuation.onTermination = { @Sendable _ in
                 tokenBox.cancelAndClear()
             }
         }
+        let continuationRef = continuation!
 
-        guard let continuationRef else {
-            assertionFailure("AsyncStream must provide continuation synchronously")
-            return AsyncStream(bufferingPolicy: bufferingPolicy) { continuation in
-                continuation.finish()
-            }
-        }
-
-        let token = subscribe(owner: owner, to: eventType, delivery: delivery) { _, event in
+        let token = subscribeInternal(owner: owner, to: eventType, delivery: delivery) { _, event in
             continuationRef.yield(event)
         }
         tokenBox.set(token)
@@ -265,6 +267,26 @@ public actor EventBus {
         }
     }
 
+    /// Unsubscribes `owner` from a specific event type.
+    public func unsubscribe<Owner: AnyObject & Sendable, Event: EventBusEvent>(
+        owner: Owner,
+        from eventType: Event.Type = Event.self
+    ) {
+        let eventKey = ObjectIdentifier(eventType)
+        guard let bucket = subscriptionsByEvent[eventKey] else {
+            return
+        }
+
+        let ownerID = ObjectIdentifier(owner)
+        let filtered = bucket.filter { _, subscription in
+            guard let existingOwner = subscription.owner else {
+                return false
+            }
+            return ObjectIdentifier(existingOwner) != ownerID
+        }
+        subscriptionsByEvent[eventKey] = filtered.isEmpty ? nil : filtered
+    }
+
     private func unsubscribe(eventKey: ObjectIdentifier, id: UUID) {
         guard var bucket = subscriptionsByEvent[eventKey] else {
             return
@@ -284,9 +306,6 @@ extension EventBus {
         case mainThread
     }
 
-    /// A cancellable handle returned by subscription APIs.
-    /// Cancellation is idempotent and thread-safe.
-    // Safe: mutable state is protected by NSLock.
     fileprivate final class CancellationState: @unchecked Sendable {
         private let lock = NSLock()
         private var isCancelled = false
@@ -305,7 +324,7 @@ extension EventBus {
     }
 
     // Safe: all mutable state is protected by NSLock, cancellation closure is Sendable.
-    public final class SubscriptionToken: @unchecked Sendable {
+    private final class SubscriptionToken: @unchecked Sendable {
         private let cancelClosure: @Sendable () -> Void
         private let cancellationState: CancellationState
         private let lock = NSLock()
@@ -319,12 +338,7 @@ extension EventBus {
             self.cancelClosure = cancelClosure
         }
 
-        deinit {
-            cancel()
-        }
-
-        /// Cancels the subscription associated with this token.
-        public func cancel() {
+        func cancel() {
             lock.lock()
             defer { lock.unlock() }
             guard !isCancelled else {
@@ -409,5 +423,21 @@ extension EventBus {
         }
     }
 
-    private actor StreamOwner {}
+    // Safe: mutable state is protected by NSLock.
+    private final class OnceGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var hasDelivered = false
+
+        func consumeFirstDelivery() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !hasDelivered else {
+                return false
+            }
+            hasDelivered = true
+            return true
+        }
+    }
+
+    private final class StreamOwner: @unchecked Sendable {}
 }

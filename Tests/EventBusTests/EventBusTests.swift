@@ -6,6 +6,10 @@ private struct IntEvent: EventBusEvent, Sendable {
     let value: Int
 }
 
+private struct StringEvent: EventBusEvent, Sendable {
+    let value: String
+}
+
 private final class TestOwner: @unchecked Sendable {}
 
 private final class BoolBox: @unchecked Sendable {
@@ -69,7 +73,7 @@ func publishDeliversToSubscriber() async {
     let owner = TestOwner()
     let recorder = Recorder()
 
-    let token = await bus.subscribe(owner: owner, to: IntEvent.self) { _, event in
+    await bus.subscribe(owner: owner, to: IntEvent.self) { _, event in
         recorder.append(event.value)
     }
 
@@ -77,7 +81,21 @@ func publishDeliversToSubscriber() async {
     await bus.publish(IntEvent(value: 2))
 
     #expect(recorder.snapshot() == [1, 2])
-    token.cancel()
+}
+
+@Test
+func subscribeWithoutRetainingTokenStaysActive() async {
+    let bus = EventBus()
+    let owner = TestOwner()
+    let recorder = Recorder()
+
+    await bus.subscribe(owner: owner, to: IntEvent.self) { _, event in
+        recorder.append(event.value)
+    }
+
+    await bus.publish(IntEvent(value: 5))
+
+    #expect(recorder.snapshot() == [5])
 }
 
 @Test
@@ -86,7 +104,7 @@ func subscribeOnceDeliversOnlyFirstEvent() async {
     let owner = TestOwner()
     let recorder = Recorder()
 
-    let token = await bus.subscribeOnce(owner: owner, to: IntEvent.self) { _, event in
+    await bus.subscribeOnce(owner: owner, to: IntEvent.self) { _, event in
         recorder.append(event.value)
     }
 
@@ -94,20 +112,49 @@ func subscribeOnceDeliversOnlyFirstEvent() async {
     await bus.publish(IntEvent(value: 20))
 
     #expect(recorder.snapshot() == [10])
-    token.cancel()
 }
 
 @Test
-func cancelStopsDelivery() async {
+func subscribeOnceMainThreadDeliversOnlyOnceAcrossQueuedPublishes() async {
     let bus = EventBus()
     let owner = TestOwner()
     let recorder = Recorder()
 
-    let token = await bus.subscribe(owner: owner, to: IntEvent.self) { _, event in
+    await bus.subscribeOnce(owner: owner, to: IntEvent.self, delivery: .mainThread) { _, event in
         recorder.append(event.value)
     }
 
-    token.cancel()
+    await withTaskGroup(of: Void.self) { group in
+        group.addTask {
+            await bus.publish(IntEvent(value: 1))
+        }
+        group.addTask {
+            await bus.publish(IntEvent(value: 2))
+        }
+        group.addTask {
+            await bus.publish(IntEvent(value: 3))
+        }
+    }
+
+    let delivered = await eventually {
+        recorder.count() == 1
+    }
+
+    #expect(delivered)
+    #expect(recorder.count() == 1)
+}
+
+@Test
+func unsubscribeStopsDelivery() async {
+    let bus = EventBus()
+    let owner = TestOwner()
+    let recorder = Recorder()
+
+    await bus.subscribe(owner: owner, to: IntEvent.self) { _, event in
+        recorder.append(event.value)
+    }
+
+    await bus.unsubscribe(owner: owner, from: IntEvent.self)
     await bus.publish(IntEvent(value: 7))
 
     #expect(recorder.count() == 0)
@@ -121,10 +168,10 @@ func unsubscribeAllRemovesOnlyMatchingOwner() async {
     let recorderA = Recorder()
     let recorderB = Recorder()
 
-    let tokenA = await bus.subscribe(owner: ownerA, to: IntEvent.self) { _, event in
+    await bus.subscribe(owner: ownerA, to: IntEvent.self) { _, event in
         recorderA.append(event.value)
     }
-    let tokenB = await bus.subscribe(owner: ownerB, to: IntEvent.self) { _, event in
+    await bus.subscribe(owner: ownerB, to: IntEvent.self) { _, event in
         recorderB.append(event.value)
     }
 
@@ -133,8 +180,28 @@ func unsubscribeAllRemovesOnlyMatchingOwner() async {
 
     #expect(recorderA.count() == 0)
     #expect(recorderB.snapshot() == [42])
-    tokenA.cancel()
-    tokenB.cancel()
+}
+
+@Test
+func unsubscribeRemovesOnlyMatchingEventType() async {
+    let bus = EventBus()
+    let owner = TestOwner()
+    let intRecorder = Recorder()
+    let stringRecorder = Recorder()
+
+    await bus.subscribe(owner: owner, to: IntEvent.self) { _, event in
+        intRecorder.append(event.value)
+    }
+    await bus.subscribe(owner: owner, to: StringEvent.self) { _, event in
+        stringRecorder.append(event.value.count)
+    }
+
+    await bus.unsubscribe(owner: owner, from: IntEvent.self)
+    await bus.publish(IntEvent(value: 11))
+    await bus.publish(StringEvent(value: "ok"))
+
+    #expect(intRecorder.count() == 0)
+    #expect(stringRecorder.snapshot() == [2])
 }
 
 @Test
@@ -166,7 +233,7 @@ func mainThreadDeliveryRunsHandlerOnMainThread() async {
     let recorder = Recorder()
     let isMainThread = BoolBox()
 
-    let token = await bus.subscribe(owner: owner, to: IntEvent.self, delivery: .mainThread) { _, event in
+    await bus.subscribe(owner: owner, to: IntEvent.self, delivery: .mainThread) { _, event in
         isMainThread.set(Thread.isMainThread)
         recorder.append(event.value)
     }
@@ -179,7 +246,32 @@ func mainThreadDeliveryRunsHandlerOnMainThread() async {
 
     #expect(delivered)
     #expect(isMainThread.get())
-    token.cancel()
+}
+
+@Test
+func mainThreadAsyncEventOnlyDeliveryRunsHandlerOnMainThread() async {
+    let bus = EventBus()
+    let owner = TestOwner()
+    let recorder = Recorder()
+    let isMainThread = BoolBox()
+
+    await bus.subscribe(
+        owner: owner,
+        to: IntEvent.self,
+        delivery: .mainThread
+    ) { event in
+        isMainThread.set(Thread.isMainThread)
+        recorder.append(event.value)
+    }
+
+    await bus.publish(IntEvent(value: 2))
+
+    let delivered = await eventually {
+        recorder.count() == 1
+    }
+
+    #expect(delivered)
+    #expect(isMainThread.get())
 }
 
 @Test
@@ -188,7 +280,7 @@ func deallocatedOwnerDoesNotReceiveEvents() async {
     var owner: TestOwner? = TestOwner()
     let recorder = Recorder()
 
-    let token = await bus.subscribe(owner: owner!, to: IntEvent.self) { _, event in
+    await bus.subscribe(owner: owner!, to: IntEvent.self) { _, event in
         recorder.append(event.value)
     }
 
@@ -196,7 +288,6 @@ func deallocatedOwnerDoesNotReceiveEvents() async {
     await bus.publish(IntEvent(value: 9))
 
     #expect(recorder.count() == 0)
-    token.cancel()
 }
 
 @Test
@@ -228,17 +319,18 @@ func streamStopsAfterConsumerCancellation() async {
 }
 
 @Test
-func cancelIsIdempotent() async {
+func unsubscribeIsIdempotent() async {
     let bus = EventBus()
     let owner = TestOwner()
     let recorder = Recorder()
-    let token = await bus.subscribe(owner: owner, to: IntEvent.self) { _, event in
+
+    await bus.subscribe(owner: owner, to: IntEvent.self) { _, event in
         recorder.append(event.value)
     }
 
-    token.cancel()
-    token.cancel()
-    token.cancel()
+    await bus.unsubscribe(owner: owner, from: IntEvent.self)
+    await bus.unsubscribe(owner: owner, from: IntEvent.self)
+    await bus.unsubscribe(owner: owner, from: IntEvent.self)
 
     await bus.publish(IntEvent(value: 100))
 
@@ -251,7 +343,7 @@ func concurrentPublishDeliversAllEventsWithoutLoss() async {
     let owner = TestOwner()
     let recorder = Recorder()
 
-    let token = await bus.subscribe(owner: owner, to: IntEvent.self) { _, event in
+    await bus.subscribe(owner: owner, to: IntEvent.self) { _, event in
         recorder.append(event.value)
     }
 
@@ -276,5 +368,4 @@ func concurrentPublishDeliversAllEventsWithoutLoss() async {
 
     #expect(allDelivered)
     #expect(recorder.count() == total)
-    token.cancel()
 }

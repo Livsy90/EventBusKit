@@ -61,7 +61,7 @@ final class SessionService: Sendable {
 /// Example subscriber that tracks the most recent logged-in user.
 actor AnalyticsSubscriber {
     private let eventBus: EventBus
-    private var subscriptionToken: EventBus.SubscriptionToken?
+    private var isStarted = false
 
     /// The last user ID observed in login events.
     private(set) var lastTrackedUserID: UserID?
@@ -75,23 +75,24 @@ actor AnalyticsSubscriber {
     ///
     /// Calling this multiple times is safe; repeated calls are ignored after the first subscription.
     func start() async {
-        guard subscriptionToken == nil else {
+        guard !isStarted else {
             return
         }
 
-        subscriptionToken = await eventBus.subscribe(
+        await eventBus.subscribe(
             owner: self,
             to: UserDidLoginEvent.self,
             delivery: .postingTask
         ) { owner, event in
             await owner.track(userID: event.userID)
         }
+        isStarted = true
     }
 
     /// Stops listening for login events.
-    func stop() {
-        subscriptionToken?.cancel()
-        subscriptionToken = nil
+    func stop() async {
+        await eventBus.unsubscribe(owner: self, from: UserDidLoginEvent.self)
+        isStarted = false
     }
 
     private func track(userID: UserID) {

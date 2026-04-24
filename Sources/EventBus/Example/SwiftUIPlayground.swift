@@ -119,9 +119,9 @@ private actor EventBusPlaygroundHarness {
     private let asyncOwner = PlaygroundOwner()
     private let onceOwner = PlaygroundOwner()
 
-    private var classicToken: EventBus.SubscriptionToken?
-    private var asyncToken: EventBus.SubscriptionToken?
-    private var onceToken: EventBus.SubscriptionToken?
+    private var classicActive = false
+    private var asyncActive = false
+    private var onceActive = false
     private var streamTask: Task<Void, Never>?
 
     private var emittedCount = 0
@@ -138,24 +138,25 @@ private actor EventBusPlaygroundHarness {
     }
 
     func startClassic() async {
-        guard classicToken == nil else {
+        guard !classicActive else {
             return
         }
 
-        classicToken = await eventBus.subscribe(owner: classicOwner, to: UserDidLoginEvent.self) { [weak self] _, event in
+        await eventBus.subscribe(owner: classicOwner, to: UserDidLoginEvent.self) { [weak self] _, event in
             Task {
                 await self?.record(channel: "classic", event: event)
             }
         }
+        classicActive = true
         addLog("classic subscribed")
     }
 
     func startAsync() async {
-        guard asyncToken == nil else {
+        guard !asyncActive else {
             return
         }
 
-        asyncToken = await eventBus.subscribe(
+        await eventBus.subscribe(
             owner: asyncOwner,
             to: UserDidLoginEvent.self,
             delivery: .postingTask,
@@ -163,19 +164,21 @@ private actor EventBusPlaygroundHarness {
         ) { [weak self] _, event in
             await self?.record(channel: "async", event: event)
         }
+        asyncActive = true
         addLog("async subscribed")
     }
 
     func startOnce() async {
-        guard onceToken == nil else {
+        guard !onceActive else {
             return
         }
 
-        onceToken = await eventBus.subscribeOnce(owner: onceOwner, to: UserDidLoginEvent.self) { [weak self] _, event in
+        await eventBus.subscribeOnce(owner: onceOwner, to: UserDidLoginEvent.self) { [weak self] _, event in
             Task {
                 await self?.record(channel: "once", event: event)
             }
         }
+        onceActive = true
         addLog("once subscribed")
     }
 
@@ -198,15 +201,15 @@ private actor EventBusPlaygroundHarness {
         addLog("stream subscribed")
     }
 
-    func stopAll() {
-        classicToken?.cancel()
-        classicToken = nil
+    func stopAll() async {
+        await eventBus.unsubscribe(owner: classicOwner, from: UserDidLoginEvent.self)
+        classicActive = false
 
-        asyncToken?.cancel()
-        asyncToken = nil
+        await eventBus.unsubscribe(owner: asyncOwner, from: UserDidLoginEvent.self)
+        asyncActive = false
 
-        onceToken?.cancel()
-        onceToken = nil
+        await eventBus.unsubscribe(owner: onceOwner, from: UserDidLoginEvent.self)
+        onceActive = false
 
         streamTask?.cancel()
         streamTask = nil
@@ -248,9 +251,9 @@ private actor EventBusPlaygroundHarness {
 
     func snapshot() -> Snapshot {
         Snapshot(
-            classicActive: classicToken != nil,
-            asyncActive: asyncToken != nil,
-            onceActive: onceToken != nil,
+            classicActive: classicActive,
+            asyncActive: asyncActive,
+            onceActive: onceActive,
             streamActive: streamTask != nil,
             emittedCount: emittedCount,
             classicCount: classicCount,
@@ -269,6 +272,7 @@ private actor EventBusPlaygroundHarness {
             asyncCount += 1
         case "once":
             onceCount += 1
+            onceActive = false
         case "stream":
             streamCount += 1
         default:
@@ -291,4 +295,3 @@ private actor EventBusPlaygroundHarness {
         EventBusPlaygroundView()
     }
 }
-

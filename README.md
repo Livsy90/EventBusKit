@@ -2,7 +2,7 @@
 
 A lightweight, type-safe event bus for Swift Concurrency.
 
-`EventBus` is implemented as an `actor`, supports automatic cleanup of dead owners, multiple delivery modes, one-shot subscriptions, and `AsyncStream` consumption.
+`EventBus` is implemented as an `actor`, supports automatic cleanup of dead owners, multiple delivery modes, one-shot subscriptions, explicit owner-based unsubscription, and `AsyncStream` consumption.
 
 ## Requirements
 
@@ -21,18 +21,17 @@ struct UserDidLoginEvent: EventBusEvent {
     let userID: String
 }
 
-let bus = EventBus.shared
+let bus = EventBus.default
 
 final class AnalyticsOwner: @unchecked Sendable {}
 let owner = AnalyticsOwner()
 
-let token = await bus.subscribe(owner: owner, to: UserDidLoginEvent.self) { _, event in
+await bus.subscribe(owner: owner, to: UserDidLoginEvent.self) { _, event in
     print("Logged in:", event.userID)
 }
 
 await bus.publish(UserDidLoginEvent(userID: "u-1"))
-
-token.cancel()
+await bus.unsubscribe(owner: owner, from: UserDidLoginEvent.self)
 ```
 
 ## Core Concepts
@@ -56,7 +55,7 @@ struct AppReadyEvent: EventBusEvent {
 
 - `subscribe(...)`: regular subscription.
 - `subscribeOnce(...)`: auto-cancels after first matching event.
-- `SubscriptionToken.cancel()`: early manual cancellation.
+- `unsubscribe(owner:from:)`: remove a specific subscription scope for an owner.
 - `unsubscribeAll(for:)`: remove all subscriptions for an owner.
 
 ### AsyncStream
@@ -76,9 +75,10 @@ Task {
 ## API Overview
 
 - `publish(_:)`
-- `publishDetached(_:priority:)`
+- `publishAsync(_:priority:)`
 - `subscribe(...)` (sync and async handlers)
 - `subscribeOnce(...)` (sync and async handlers)
+- `unsubscribe(owner:from:)`
 - `stream(_:delivery:bufferingPolicy:)`
 - `unsubscribeAll(for:)`
 
@@ -86,7 +86,8 @@ Task {
 
 - Internal state is actor-isolated.
 - Delivery ordering across different tasks is best-effort.
-- Cancellation is idempotent.
+- Unsubscribe operations are idempotent.
+- Subscriptions stay active while their owner is alive unless they are explicitly removed.
 
 ## Examples
 
