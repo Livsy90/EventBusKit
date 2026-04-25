@@ -1,8 +1,8 @@
-# EventBus
+# EventBusKit
 
-A lightweight, type-safe event bus for Swift Concurrency.
+A lightweight, type-safe event bus for Swift and iOS code.
 
-`EventBus` is implemented as an `actor`, supports automatic cleanup of dead owners, multiple delivery modes, one-shot subscriptions, explicit owner-based unsubscription, and `AsyncStream` consumption.
+`EventBus` is implemented as a thread-safe `final class` backed by `NSLock`. It supports weak owner lifecycle, token-based cancellation, one-shot subscriptions, ordered snapshot delivery, `AsyncStream` consumption, and a `MainActor`-friendly overload for UI owners.
 
 ## Requirements
 
@@ -26,12 +26,12 @@ let bus = EventBus.default
 final class AnalyticsOwner: @unchecked Sendable {}
 let owner = AnalyticsOwner()
 
-await bus.subscribe(owner: owner, to: UserDidLoginEvent.self) { _, event in
+let token = bus.subscribe(owner: owner, to: UserDidLoginEvent.self) { _, event in
     print("Logged in:", event.userID)
 }
 
-await bus.publish(UserDidLoginEvent(userID: "u-1"))
-await bus.unsubscribe(owner: owner, from: UserDidLoginEvent.self)
+bus.publish(UserDidLoginEvent(userID: "u-1"))
+token.cancel()
 ```
 
 ## Core Concepts
@@ -48,22 +48,29 @@ struct AppReadyEvent: EventBusEvent {
 
 ### Delivery Modes
 
-- `.postingTask`: executes handler inline in posting task context.
-- `.mainThread`: dispatches handler asynchronously on `MainActor`.
+- `.immediate`: invokes the handler synchronously during `publish(_:)` after the lock is released. This does not imply `MainActor`.
+- `.mainActor`: schedules delivery asynchronously on `MainActor`.
 
 ### Subscriptions
 
-- `subscribe(...)`: regular subscription.
-- `subscribeOnce(...)`: auto-cancels after first matching event.
-- `unsubscribe(owner:from:)`: remove a specific subscription scope for an owner.
-- `unsubscribeAll(for:)`: remove all subscriptions for an owner.
+- Every `subscribe(...)` call creates a new independent subscription.
+- One owner may have multiple subscriptions for the same event type.
+- `SubscriptionToken.cancel()` cancels one specific subscription.
+- `unsubscribe(owner:from:)` removes all subscriptions for one owner and event type.
+- `unsubscribeAll(for:)` removes all subscriptions for one owner across all event types.
+
+### Async Handlers
+
+- Async overloads launch handlers in fire-and-forget `Task`.
+- `publish(_:)` does not await async handlers.
+- Cancelling a token prevents new deliveries, but does not necessarily cancel an async handler that has already started.
 
 ### AsyncStream
 
 Consume events with `for await`:
 
 ```swift
-let stream = await bus.stream(AppReadyEvent.self)
+let stream = bus.stream(AppReadyEvent.self)
 
 Task {
     for await event in stream {
@@ -76,18 +83,23 @@ Task {
 
 - `publish(_:)`
 - `publishAsync(_:priority:)`
-- `subscribe(...)` (sync and async handlers)
-- `subscribeOnce(...)` (sync and async handlers)
+- `subscribe(...)` with `(Owner, Event)` handler
+- `subscribe(...)` with `Event`-only handler
+- `subscribeOnce(...)`
+- `subscribeOnMain(...)`
 - `unsubscribe(owner:from:)`
-- `stream(_:delivery:bufferingPolicy:)`
 - `unsubscribeAll(for:)`
+- `stream(_:delivery:bufferingPolicy:)`
 
-## Concurrency Notes
+## Thread Safety
 
-- Internal state is actor-isolated.
-- Delivery ordering across different tasks is best-effort.
-- Unsubscribe operations are idempotent.
-- Subscriptions stay active while their owner is alive unless they are explicitly removed.
+- `EventBus` is thread-safe.
+- Internal state is protected by `NSLock`.
+- Dead subscriptions are cleaned lazily on subscribe and publish.
+- `publish(_:)` uses snapshot delivery.
+- Subscribers added during publish do not receive the current event.
+- Subscribers removed during publish may already be in the snapshot, but `CancellationState` prevents cancelled handlers from running.
+- Delivery order is registration order.
 
 ## Examples
 
@@ -102,4 +114,4 @@ Unit tests are located in:
 
 - `Tests/EventBusTests/EventBusTests.swift`
 
-They cover baseline delivery, cancellation, one-shot subscriptions, stream behavior, main-thread delivery, and concurrent publishing.
+They cover delivery order, token-based cancellation, owner-based unsubscription, one-shot semantics, `MainActor` delivery, `AsyncStream`, and concurrent publishing.

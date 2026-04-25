@@ -53,15 +53,15 @@ final class SessionService: Sendable {
     }
 
     /// Emits `UserDidLoginEvent` for a successful login.
-    nonisolated func login(userID: UserID, source: UserDidLoginEvent.Source) async {
-        await eventBus.publish(UserDidLoginEvent(userID: userID, source: source))
+    nonisolated func login(userID: UserID, source: UserDidLoginEvent.Source) {
+        eventBus.publish(UserDidLoginEvent(userID: userID, source: source))
     }
 }
 
 /// Example subscriber that tracks the most recent logged-in user.
 actor AnalyticsSubscriber {
     private let eventBus: EventBus
-    private var isStarted = false
+    private var subscriptionToken: EventBus.SubscriptionToken?
 
     /// The last user ID observed in login events.
     private(set) var lastTrackedUserID: UserID?
@@ -74,25 +74,24 @@ actor AnalyticsSubscriber {
     /// Starts listening for login events.
     ///
     /// Calling this multiple times is safe; repeated calls are ignored after the first subscription.
-    func start() async {
-        guard !isStarted else {
+    func start() {
+        guard subscriptionToken == nil else {
             return
         }
 
-        await eventBus.subscribe(
+        subscriptionToken = eventBus.subscribe(
             owner: self,
             to: UserDidLoginEvent.self,
-            delivery: .postingTask
+            delivery: .immediate
         ) { owner, event in
             await owner.track(userID: event.userID)
         }
-        isStarted = true
     }
 
     /// Stops listening for login events.
-    func stop() async {
-        await eventBus.unsubscribe(owner: self, from: UserDidLoginEvent.self)
-        isStarted = false
+    func stop() {
+        subscriptionToken?.cancel()
+        subscriptionToken = nil
     }
 
     private func track(userID: UserID) {
@@ -121,9 +120,9 @@ actor StreamAnalyticsSubscriber {
         }
 
         streamTask = Task { [eventBus] in
-            let events = await eventBus.stream(
+            let events = eventBus.stream(
                 UserDidLoginEvent.self,
-                delivery: .postingTask,
+                delivery: .immediate,
                 bufferingPolicy: .bufferingNewest(50)
             )
 
