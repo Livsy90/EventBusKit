@@ -1,6 +1,6 @@
 # EventBusKit
 
-A lightweight, type-safe event bus for Swift and iOS code.
+A lightweight, type-safe event bus for Swift code.
 
 `EventBus` is implemented as a thread-safe `final class` backed by `NSLock`. It supports weak owner lifecycle, token-based cancellation, one-shot subscriptions, ordered snapshot delivery, `AsyncStream` consumption, and a `MainActor`-friendly overload for UI owners.
 
