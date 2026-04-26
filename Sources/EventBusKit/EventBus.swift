@@ -13,9 +13,6 @@ import Foundation
 /// - Subscribers added during `publish(_:)` do not receive the current event.
 /// - Subscribers removed during `publish(_:)` may already be in the snapshot, but
 ///   `CancellationState` prevents cancelled handlers from running.
-/// - `.immediate` invokes handlers synchronously after the lock is released.
-/// - `.mainActor` schedules delivery asynchronously on `MainActor`.
-/// - Async handlers are fire-and-forget; `publish(_:)` does not await them.
 public final class EventBus: @unchecked Sendable {
     private let lock = NSLock()
     private var subscriptionsByEvent: [ObjectIdentifier: [SubscriptionEntry]] = [:]
@@ -31,7 +28,7 @@ public final class EventBus: @unchecked Sendable {
     /// Dead subscriptions are removed before snapshot delivery.
     public func publish<Event: EventBusEvent>(_ event: Event) {
         let eventKey = ObjectIdentifier(Event.self)
-        let receivers: [@Sendable (Any) -> Void] = lock.withLock {
+        let receivers: [(Any) -> Void] = lock.withLock {
             guard var bucket = subscriptionsByEvent[eventKey] else {
                 return []
             }
@@ -44,19 +41,6 @@ public final class EventBus: @unchecked Sendable {
         receivers.forEach { $0(event) }
     }
 
-    /// Publishes an event from a new unstructured task.
-    ///
-    /// - Returns: The created task so callers can cancel or await completion.
-    @discardableResult
-    public func publishAsync<Event: EventBusEvent>(
-        _ event: Event,
-        priority: TaskPriority? = nil
-    ) -> Task<Void, Never> {
-        Task(priority: priority) { [self] in
-            publish(event)
-        }
-    }
-
     /// Subscribes `owner` to events of inferred type `Event`.
     ///
     /// Each call creates a new independent subscription. Keep the returned token if
@@ -64,93 +48,22 @@ public final class EventBus: @unchecked Sendable {
     /// is optional; the subscription is also removed automatically when `owner` is
     /// deallocated.
     @discardableResult
-    public func subscribe<Owner: AnyObject & Sendable, Event: EventBusEvent>(
+    public func subscribe<Owner: AnyObject, Event: EventBusEvent>(
         owner: Owner,
-        delivery: Delivery = .immediate,
-        handler: @escaping @Sendable (Owner, Event) -> Void
+        handler: @escaping (Owner, Event) -> Void
     ) -> SubscriptionToken {
-        subscribe(owner: owner, to: Event.self, delivery: delivery, handler: handler)
-    }
-
-    /// Subscribes `owner` with an async handler to events of inferred type `Event`.
-    ///
-    /// Async handlers are delivered via fire-and-forget `Task`.
-    /// For UI-bound handlers that must be `MainActor`-isolated, prefer `subscribeOnMain`.
-    @discardableResult
-    public func subscribe<Owner: AnyObject & Sendable, Event: EventBusEvent>(
-        owner: Owner,
-        delivery: Delivery = .immediate,
-        taskPriority: TaskPriority? = nil,
-        handler: @escaping @Sendable (Owner, Event) async -> Void
-    ) -> SubscriptionToken {
-        subscribe(
-            owner: owner,
-            to: Event.self,
-            delivery: delivery,
-            taskPriority: taskPriority,
-            handler: handler
-        )
+        subscribe(owner: owner, to: Event.self, handler: handler)
     }
 
     /// Subscribes `owner` to a specific event type using an event-only handler.
     @discardableResult
-    public func subscribe<Owner: AnyObject & Sendable, Event: EventBusEvent>(
+    public func subscribe<Owner: AnyObject, Event: EventBusEvent>(
         owner: Owner,
         to eventType: Event.Type = Event.self,
-        delivery: Delivery = .immediate,
-        handler: @escaping @Sendable (Event) -> Void
+        handler: @escaping (Event) -> Void
     ) -> SubscriptionToken {
-        subscribe(owner: owner, to: eventType, delivery: delivery) { _, event in
+        subscribe(owner: owner, to: eventType) { _, event in
             handler(event)
-        }
-    }
-
-    /// Subscribes `owner` to a specific event type using an async event-only handler.
-    ///
-    /// Async handlers are delivered via fire-and-forget `Task`.
-    /// For UI-bound handlers that must be `MainActor`-isolated, prefer `subscribeOnMain`.
-    @discardableResult
-    public func subscribe<Owner: AnyObject & Sendable, Event: EventBusEvent>(
-        owner: Owner,
-        to eventType: Event.Type = Event.self,
-        delivery: Delivery = .immediate,
-        taskPriority: TaskPriority? = nil,
-        handler: @escaping @Sendable (Event) async -> Void
-    ) -> SubscriptionToken {
-        subscribe(
-            owner: owner,
-            to: eventType,
-            delivery: delivery,
-            taskPriority: taskPriority
-        ) { _, event in
-            await handler(event)
-        }
-    }
-
-    /// Subscribes `owner` to a specific event type using an async `(owner, event)` handler.
-    ///
-    /// Async handlers are delivered via fire-and-forget `Task`. Cancelling the token prevents
-    /// new deliveries, but does not necessarily cancel a task that has already started.
-    /// For UI-bound handlers that must be `MainActor`-isolated, prefer `subscribeOnMain`.
-    @discardableResult
-    public func subscribe<Owner: AnyObject & Sendable, Event: EventBusEvent>(
-        owner: Owner,
-        to eventType: Event.Type = Event.self,
-        delivery: Delivery = .immediate,
-        taskPriority: TaskPriority? = nil,
-        handler: @escaping @Sendable (Owner, Event) async -> Void
-    ) -> SubscriptionToken {
-        subscribe(owner: owner, to: eventType, delivery: delivery) { owner, event in
-            switch delivery {
-            case .immediate:
-                Task(priority: taskPriority) {
-                    await handler(owner, event)
-                }
-            case .mainActor:
-                Task(priority: taskPriority) { @MainActor in
-                    await handler(owner, event)
-                }
-            }
         }
     }
 
@@ -160,13 +73,12 @@ public final class EventBus: @unchecked Sendable {
     /// subscriptions to the same event type. Keeping the returned token is optional;
     /// the subscription is also removed automatically when `owner` is deallocated.
     @discardableResult
-    public func subscribe<Owner: AnyObject & Sendable, Event: EventBusEvent>(
+    public func subscribe<Owner: AnyObject, Event: EventBusEvent>(
         owner: Owner,
         to eventType: Event.Type = Event.self,
-        delivery: Delivery = .immediate,
-        handler: @escaping @Sendable (Owner, Event) -> Void
+        handler: @escaping (Owner, Event) -> Void
     ) -> SubscriptionToken {
-        subscribeInternal(owner: owner, to: eventType, delivery: delivery, handler: handler)
+        subscribeInternal(owner: owner, to: eventType, handler: handler)
     }
 
     /// Subscribes a `MainActor` owner without requiring `Sendable`.
@@ -189,15 +101,14 @@ public final class EventBus: @unchecked Sendable {
     /// use it only if you need to cancel the one-shot subscription before the first
     /// matching event arrives.
     @discardableResult
-    public func subscribeOnce<Owner: AnyObject & Sendable, Event: EventBusEvent>(
+    public func subscribeOnce<Owner: AnyObject, Event: EventBusEvent>(
         owner: Owner,
         to eventType: Event.Type = Event.self,
-        delivery: Delivery = .immediate,
-        handler: @escaping @Sendable (Owner, Event) -> Void
+        handler: @escaping (Owner, Event) -> Void
     ) -> SubscriptionToken {
         let tokenBox = TokenBox()
         let onceGate = OnceGate()
-        let token = subscribeInternal(owner: owner, to: eventType, delivery: delivery) { owner, event in
+        let token = subscribeInternal(owner: owner, to: eventType) { owner, event in
             guard onceGate.consumeFirstDelivery() else {
                 return
             }
@@ -210,62 +121,13 @@ public final class EventBus: @unchecked Sendable {
 
     /// Subscribes once with an event-only handler.
     @discardableResult
-    public func subscribeOnce<Owner: AnyObject & Sendable, Event: EventBusEvent>(
+    public func subscribeOnce<Owner: AnyObject, Event: EventBusEvent>(
         owner: Owner,
         to eventType: Event.Type = Event.self,
-        delivery: Delivery = .immediate,
-        handler: @escaping @Sendable (Event) -> Void
+        handler: @escaping (Event) -> Void
     ) -> SubscriptionToken {
-        subscribeOnce(owner: owner, to: eventType, delivery: delivery) { _, event in
+        subscribeOnce(owner: owner, to: eventType) { _, event in
             handler(event)
-        }
-    }
-
-    /// Subscribes once with an async event-only handler.
-    ///
-    /// Async handlers are delivered via fire-and-forget `Task`.
-    /// For UI-bound handlers that must be `MainActor`-isolated, prefer `subscribeOnMain`.
-    @discardableResult
-    public func subscribeOnce<Owner: AnyObject & Sendable, Event: EventBusEvent>(
-        owner: Owner,
-        to eventType: Event.Type = Event.self,
-        delivery: Delivery = .immediate,
-        taskPriority: TaskPriority? = nil,
-        handler: @escaping @Sendable (Event) async -> Void
-    ) -> SubscriptionToken {
-        subscribeOnce(
-            owner: owner,
-            to: eventType,
-            delivery: delivery,
-            taskPriority: taskPriority
-        ) { _, event in
-            await handler(event)
-        }
-    }
-
-    /// Subscribes once with an async `(owner, event)` handler.
-    ///
-    /// Async handlers are delivered via fire-and-forget `Task`.
-    /// For UI-bound handlers that must be `MainActor`-isolated, prefer `subscribeOnMain`.
-    @discardableResult
-    public func subscribeOnce<Owner: AnyObject & Sendable, Event: EventBusEvent>(
-        owner: Owner,
-        to eventType: Event.Type = Event.self,
-        delivery: Delivery = .immediate,
-        taskPriority: TaskPriority? = nil,
-        handler: @escaping @Sendable (Owner, Event) async -> Void
-    ) -> SubscriptionToken {
-        subscribeOnce(owner: owner, to: eventType, delivery: delivery) { owner, event in
-            switch delivery {
-            case .immediate:
-                Task(priority: taskPriority) {
-                    await handler(owner, event)
-                }
-            case .mainActor:
-                Task(priority: taskPriority) { @MainActor in
-                    await handler(owner, event)
-                }
-            }
         }
     }
 
@@ -274,7 +136,6 @@ public final class EventBus: @unchecked Sendable {
     /// The stream keeps an internal owner alive and cancels its subscription on termination.
     public func stream<Event: EventBusEvent>(
         _ eventType: Event.Type = Event.self,
-        delivery: Delivery = .immediate,
         bufferingPolicy: AsyncStream<Event>.Continuation.BufferingPolicy = .bufferingNewest(100)
     ) -> AsyncStream<Event> {
         let owner = StreamOwner()
@@ -295,7 +156,7 @@ public final class EventBus: @unchecked Sendable {
             return AsyncStream { $0.finish() }
         }
 
-        let token = subscribe(owner: owner, to: eventType, delivery: delivery) { (_: StreamOwner, event: Event) in
+        let token = subscribe(owner: owner, to: eventType) { (_: StreamOwner, event: Event) in
             continuationRef.yield(event)
         }
         tokenBox.set(token)
@@ -341,7 +202,13 @@ public final class EventBus: @unchecked Sendable {
         let ownerID = ObjectIdentifier(owner)
 
         lock.withLock {
-            for (eventKey, bucket) in subscriptionsByEvent {
+            let eventKeys = Array(subscriptionsByEvent.keys)
+
+            for eventKey in eventKeys {
+                guard let bucket = subscriptionsByEvent[eventKey] else {
+                    continue
+                }
+
                 var filtered: [SubscriptionEntry] = []
                 filtered.reserveCapacity(bucket.count)
 
@@ -364,15 +231,6 @@ public final class EventBus: @unchecked Sendable {
 }
 
 extension EventBus {
-    /// Where a subscriber handler is executed.
-    public enum Delivery: Sendable {
-        /// Executes the handler synchronously during `publish(_:)` after the lock is released.
-        /// This does not imply `MainActor`.
-        case immediate
-        /// Schedules the handler asynchronously on `MainActor`.
-        case mainActor
-    }
-
     /// A cancellable handle for one specific subscription.
     public final class SubscriptionToken: @unchecked Sendable {
         private let lock = NSLock()
@@ -405,23 +263,16 @@ extension EventBus {
 }
 
 private extension EventBus {
-    struct SubscriptionEntry {
-        let id: UUID
-        let subscription: Subscription
-    }
-
-    func subscribeInternal<Owner: AnyObject & Sendable, Event: EventBusEvent>(
+    func subscribeInternal<Owner: AnyObject, Event: EventBusEvent>(
         owner: Owner,
         to eventType: Event.Type,
-        delivery: Delivery,
-        handler: @escaping @Sendable (Owner, Event) -> Void
+        handler: @escaping (Owner, Event) -> Void
     ) -> SubscriptionToken {
         let eventKey = ObjectIdentifier(eventType)
         let id = UUID()
         let cancellationState = CancellationState()
         let subscription = Subscription(
             owner: owner,
-            delivery: delivery,
             cancellationState: cancellationState,
             handler: handler
         )
@@ -468,7 +319,9 @@ private extension EventBus {
     }
 
     func cleanDeadSubscriptions(in bucket: [SubscriptionEntry]) -> [SubscriptionEntry] {
-        bucket.filter { $0.subscription.isAlive }
+        bucket.filter {
+            $0.subscription.isAlive && !$0.subscription.cancellationState.cancelled()
+        }
     }
 
     func removeSubscription(eventKey: ObjectIdentifier, id: UUID) {
@@ -485,6 +338,13 @@ private extension EventBus {
             bucket.remove(at: index)
             subscriptionsByEvent[eventKey] = bucket.isEmpty ? nil : bucket
         }
+    }
+}
+
+private extension EventBus {
+    struct SubscriptionEntry {
+        let id: UUID
+        let subscription: Subscription
     }
 
     final class CancellationState: @unchecked Sendable {
@@ -507,42 +367,22 @@ private extension EventBus {
     final class Subscription {
         private weak var owner: AnyObject?
         let cancellationState: CancellationState
-        let receive: @Sendable (Any) -> Void
+        let receive: (Any) -> Void
 
-        init<Owner: AnyObject & Sendable, Event: EventBusEvent>(
+        init<Owner: AnyObject, Event: EventBusEvent>(
             owner: Owner,
-            delivery: Delivery,
             cancellationState: CancellationState,
-            handler: @escaping @Sendable (Owner, Event) -> Void
+            handler: @escaping (Owner, Event) -> Void
         ) {
             self.owner = owner
             self.cancellationState = cancellationState
-
-            switch delivery {
-            case .immediate:
-                self.receive = { [weak owner] rawEvent in
-                    guard !cancellationState.cancelled(),
-                          let owner,
-                          let event = rawEvent as? Event else {
-                        return
-                    }
-                    handler(owner, event)
+            self.receive = { [weak owner] rawEvent in
+                guard !cancellationState.cancelled(),
+                      let owner,
+                      let event = rawEvent as? Event else {
+                    return
                 }
-            case .mainActor:
-                self.receive = { [weak owner] rawEvent in
-                    guard !cancellationState.cancelled(),
-                          let event = rawEvent as? Event else {
-                        return
-                    }
-
-                    Task { @MainActor [weak owner] in
-                        guard !cancellationState.cancelled(),
-                              let owner else {
-                            return
-                        }
-                        handler(owner, event)
-                    }
-                }
+                handler(owner, event)
             }
         }
 
@@ -587,7 +427,6 @@ private extension EventBus {
         }
     }
 
-    // Safe: token/owner references are only accessed under NSLock.
     final class TokenBox: @unchecked Sendable {
         private let lock = NSLock()
         private var token: SubscriptionToken?
@@ -622,7 +461,6 @@ private extension EventBus {
         }
     }
 
-    // Safe: mutable state is protected by NSLock.
     final class OnceGate: @unchecked Sendable {
         private let lock = NSLock()
         private var hasDelivered = false

@@ -2,8 +2,7 @@ import SwiftUI
 
 @available(iOS 15.0, *)
 private struct EventBusPlaygroundView: View {
-    @State private var harness = EventBusPlaygroundHarness()
-    @State private var snapshot = EventBusPlaygroundHarness.Snapshot.empty
+    @StateObject private var model = EventBusPlaygroundModel()
     @State private var source: UserDidLoginEvent.Source = .password
 
     var body: some View {
@@ -21,35 +20,32 @@ private struct EventBusPlaygroundView: View {
 
                 VStack(alignment: .leading, spacing: 8) {
                     Button("Start Classic Subscribe") {
-                        run { await $0.startClassic() }
-                    }
-                    Button("Start Async Subscribe") {
-                        run { await $0.startAsync() }
+                        model.startClassic()
                     }
                     Button("Start Once Subscribe") {
-                        run { await $0.startOnce() }
+                        model.startOnce()
                     }
                     Button("Start Stream Subscribe") {
-                        run { await $0.startStream() }
+                        model.startStream()
                     }
                     Button("Publish One") {
-                        run { await $0.publishOne(source: source) }
+                        model.publishOne(source: source)
                     }
                     Button("Publish Burst (5)") {
-                        run { await $0.publishBurst(count: 5, source: source) }
+                        model.publishBurst(count: 5, source: source)
                     }
                     Button("Stop All") {
-                        run { await $0.stopAll() }
+                        model.stopAll()
                     }
                     Button("Reset State") {
-                        run { await $0.resetState() }
+                        model.resetState()
                     }
                 }
 
                 Group {
-                    Text("Active: classic=\(snapshot.classicActive.description), async=\(snapshot.asyncActive.description), once=\(snapshot.onceActive.description), stream=\(snapshot.streamActive.description)")
-                    Text("Emitted: \(snapshot.emittedCount)")
-                    Text("Received: classic=\(snapshot.classicCount), async=\(snapshot.asyncCount), once=\(snapshot.onceCount), stream=\(snapshot.streamCount)")
+                    Text("Active: classic=\(model.classicActive.description), once=\(model.onceActive.description), stream=\(model.streamActive.description)")
+                    Text("Emitted: \(model.emittedCount)")
+                    Text("Received: classic=\(model.classicCount), once=\(model.onceCount), stream=\(model.streamCount)")
                 }
                 .font(.caption.monospaced())
 
@@ -58,7 +54,7 @@ private struct EventBusPlaygroundView: View {
                 Text("Logs")
                     .font(.headline)
 
-                ForEach(Array(snapshot.logs.enumerated()), id: \.offset) { _, line in
+                ForEach(Array(model.logs.enumerated()), id: \.offset) { _, line in
                     Text(line)
                         .font(.caption.monospaced())
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -66,70 +62,31 @@ private struct EventBusPlaygroundView: View {
             }
             .padding()
         }
-        .task {
-            let initial = await harness.snapshot()
-            snapshot = initial
-        }
-    }
-
-    private func run(_ action: @escaping @Sendable (EventBusPlaygroundHarness) async -> Void) {
-        Task {
-            await action(harness)
-            let latest = await harness.snapshot()
-            await MainActor.run {
-                snapshot = latest
-            }
-        }
     }
 }
 
-private final class PlaygroundOwner: @unchecked Sendable {}
+private final class PlaygroundOwner {}
 
-private actor EventBusPlaygroundHarness {
-    struct Snapshot: Sendable {
-        let classicActive: Bool
-        let asyncActive: Bool
-        let onceActive: Bool
-        let streamActive: Bool
-        let emittedCount: Int
-        let classicCount: Int
-        let asyncCount: Int
-        let onceCount: Int
-        let streamCount: Int
-        let logs: [String]
-
-        static let empty = Snapshot(
-            classicActive: false,
-            asyncActive: false,
-            onceActive: false,
-            streamActive: false,
-            emittedCount: 0,
-            classicCount: 0,
-            asyncCount: 0,
-            onceCount: 0,
-            streamCount: 0,
-            logs: []
-        )
-    }
+@MainActor
+private final class EventBusPlaygroundModel: ObservableObject {
+    @Published private(set) var classicActive = false
+    @Published private(set) var onceActive = false
+    @Published private(set) var streamActive = false
+    @Published private(set) var emittedCount = 0
+    @Published private(set) var classicCount = 0
+    @Published private(set) var onceCount = 0
+    @Published private(set) var streamCount = 0
+    @Published private(set) var logs: [String] = []
 
     private let eventBus: EventBus
     private let sessionService: SessionService
 
     private let classicOwner = PlaygroundOwner()
-    private let asyncOwner = PlaygroundOwner()
     private let onceOwner = PlaygroundOwner()
 
     private var classicToken: EventBus.SubscriptionToken?
-    private var asyncToken: EventBus.SubscriptionToken?
     private var onceToken: EventBus.SubscriptionToken?
     private var streamTask: Task<Void, Never>?
-
-    private var emittedCount = 0
-    private var classicCount = 0
-    private var asyncCount = 0
-    private var onceCount = 0
-    private var streamCount = 0
-    private var logs: [String] = []
     private var nextUserIndex = 1
 
     init(eventBus: EventBus = .default) {
@@ -137,45 +94,40 @@ private actor EventBusPlaygroundHarness {
         self.sessionService = SessionService(eventBus: eventBus)
     }
 
-    func startClassic() async {
+    func startClassic() {
         guard classicToken == nil else {
             return
         }
 
-        classicToken = eventBus.subscribe(owner: classicOwner, to: UserDidLoginEvent.self) { [weak self] _, event in
-            Task {
-                await self?.record(channel: "classic", event: event)
+        classicToken = eventBus.subscribeOnMain(owner: classicOwner, to: UserDidLoginEvent.self) { [weak self] _, event in
+            guard let self else {
+                return
             }
+
+            self.classicCount += 1
+            self.addLog("classic received: \(event.userID.rawValue)")
         }
+        classicActive = true
         addLog("classic subscribed")
     }
 
-    func startAsync() async {
-        guard asyncToken == nil else {
-            return
-        }
-
-        asyncToken = eventBus.subscribe(
-            owner: asyncOwner,
-            to: UserDidLoginEvent.self,
-            delivery: .immediate,
-            taskPriority: .utility
-        ) { [weak self] _, event in
-            await self?.record(channel: "async", event: event)
-        }
-        addLog("async subscribed")
-    }
-
-    func startOnce() async {
+    func startOnce() {
         guard onceToken == nil else {
             return
         }
 
-        onceToken = eventBus.subscribeOnce(owner: onceOwner, to: UserDidLoginEvent.self) { [weak self] _, event in
-            Task {
-                await self?.record(channel: "once", event: event)
+        onceToken = eventBus.subscribeOnMain(owner: onceOwner, to: UserDidLoginEvent.self) { [weak self] _, event in
+            guard let self else {
+                return
             }
+
+            self.onceCount += 1
+            self.onceToken?.cancel()
+            self.onceToken = nil
+            self.onceActive = false
+            self.addLog("once received: \(event.userID.rawValue)")
         }
+        onceActive = true
         addLog("once subscribed")
     }
 
@@ -184,32 +136,55 @@ private actor EventBusPlaygroundHarness {
             return
         }
 
-        streamTask = Task { [eventBus, weak self] in
-            let stream = eventBus.stream(
-                UserDidLoginEvent.self,
-                delivery: .immediate,
-                bufferingPolicy: .bufferingNewest(20)
-            )
+        let stream = eventBus.stream(
+            UserDidLoginEvent.self,
+            bufferingPolicy: .bufferingNewest(20)
+        )
+
+        streamTask = Task { @MainActor [weak self] in
+            guard let self else {
+                return
+            }
 
             for await event in stream {
-                await self?.record(channel: "stream", event: event)
+                self.streamCount += 1
+                self.addLog("stream received: \(event.userID.rawValue)")
             }
         }
+        streamActive = true
         addLog("stream subscribed")
     }
 
-    func stopAll() async {
+    func publishOne(source: UserDidLoginEvent.Source) {
+        emittedCount += 1
+        sessionService.login(userID: UserID("user-\(nextUserIndex)"), source: source)
+        nextUserIndex += 1
+        addLog("published 1 event [\(source.rawValue)]")
+    }
+
+    func publishBurst(count: Int, source: UserDidLoginEvent.Source) {
+        guard count > 0 else {
+            return
+        }
+
+        for _ in 0..<count {
+            publishOne(source: source)
+        }
+        addLog("burst published: \(count)")
+    }
+
+    func stopAll() {
         classicToken?.cancel()
         classicToken = nil
-
-        asyncToken?.cancel()
-        asyncToken = nil
+        classicActive = false
 
         onceToken?.cancel()
         onceToken = nil
+        onceActive = false
 
         streamTask?.cancel()
         streamTask = nil
+        streamActive = false
 
         addLog("all subscriptions stopped")
     }
@@ -217,66 +192,10 @@ private actor EventBusPlaygroundHarness {
     func resetState() {
         emittedCount = 0
         classicCount = 0
-        asyncCount = 0
         onceCount = 0
         streamCount = 0
         nextUserIndex = 1
         logs = ["state reset"]
-    }
-
-    private func login(userID: UserID, source: UserDidLoginEvent.Source) async {
-        sessionService.login(userID: userID, source: source)
-    }
-
-    func publishOne(source: UserDidLoginEvent.Source) async {
-        emittedCount += 1
-        await login(userID: UserID("user-\(nextUserIndex)"), source: source)
-        nextUserIndex += 1
-        addLog("published 1 event [\(source.rawValue)]")
-    }
-
-    func publishBurst(count: Int, source: UserDidLoginEvent.Source) async {
-        guard count > 0 else {
-            return
-        }
-
-        for _ in 0..<count {
-            await publishOne(source: source)
-        }
-        addLog("burst published: \(count)")
-    }
-
-    func snapshot() -> Snapshot {
-        Snapshot(
-            classicActive: classicToken != nil,
-            asyncActive: asyncToken != nil,
-            onceActive: onceToken != nil,
-            streamActive: streamTask != nil,
-            emittedCount: emittedCount,
-            classicCount: classicCount,
-            asyncCount: asyncCount,
-            onceCount: onceCount,
-            streamCount: streamCount,
-            logs: logs
-        )
-    }
-
-    private func record(channel: String, event: UserDidLoginEvent) {
-        switch channel {
-        case "classic":
-            classicCount += 1
-        case "async":
-            asyncCount += 1
-        case "once":
-            onceCount += 1
-            onceToken = nil
-        case "stream":
-            streamCount += 1
-        default:
-            break
-        }
-
-        addLog("\(channel) received: \(event.userID.rawValue)")
     }
 
     private func addLog(_ message: String) {

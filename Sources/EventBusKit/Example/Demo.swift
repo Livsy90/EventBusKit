@@ -1,12 +1,12 @@
 import Foundation
 
 /// Strongly-typed user identifier used by auth-related events.
-struct UserID: Hashable, Sendable, Codable {
+struct UserID: Hashable, Codable {
     /// Raw user identifier string.
     let rawValue: String
 
     /// Creates a `UserID` from a raw string value.
-    nonisolated init(_ rawValue: String) {
+    init(_ rawValue: String) {
         self.rawValue = rawValue
     }
 }
@@ -14,7 +14,7 @@ struct UserID: Hashable, Sendable, Codable {
 /// Event emitted when a user login succeeds.
 struct UserDidLoginEvent: EventBusEvent, Equatable, Codable {
     /// Authentication source used for login.
-    enum Source: String, Sendable, Codable, CaseIterable {
+    enum Source: String, Codable, CaseIterable {
         case password
         case oauth
         case biometrics
@@ -30,7 +30,7 @@ struct UserDidLoginEvent: EventBusEvent, Equatable, Codable {
     let source: Source
 
     /// Creates a new login event.
-    nonisolated init(
+    init(
         userID: UserID,
         occurredAt: Date = Date(),
         correlationID: UUID = UUID(),
@@ -44,22 +44,22 @@ struct UserDidLoginEvent: EventBusEvent, Equatable, Codable {
 }
 
 /// Example publisher that emits authentication events.
-final class SessionService: Sendable {
+final class SessionService {
     private let eventBus: EventBus
 
     /// Creates a new session service.
-    nonisolated init(eventBus: EventBus = .default) {
+    init(eventBus: EventBus = .default) {
         self.eventBus = eventBus
     }
 
     /// Emits `UserDidLoginEvent` for a successful login.
-    nonisolated func login(userID: UserID, source: UserDidLoginEvent.Source) {
+    func login(userID: UserID, source: UserDidLoginEvent.Source) {
         eventBus.publish(UserDidLoginEvent(userID: userID, source: source))
     }
 }
 
 /// Example subscriber that tracks the most recent logged-in user.
-actor AnalyticsSubscriber {
+final class AnalyticsSubscriber {
     private let eventBus: EventBus
     private var subscriptionToken: EventBus.SubscriptionToken?
 
@@ -79,12 +79,8 @@ actor AnalyticsSubscriber {
             return
         }
 
-        subscriptionToken = eventBus.subscribe(
-            owner: self,
-            to: UserDidLoginEvent.self,
-            delivery: .immediate
-        ) { owner, event in
-            await owner.track(userID: event.userID)
+        subscriptionToken = eventBus.subscribe(owner: self, to: UserDidLoginEvent.self) { owner, event in
+            owner.lastTrackedUserID = event.userID
         }
     }
 
@@ -93,13 +89,11 @@ actor AnalyticsSubscriber {
         subscriptionToken?.cancel()
         subscriptionToken = nil
     }
-
-    private func track(userID: UserID) {
-        lastTrackedUserID = userID
-    }
 }
+
 /// Example subscriber that consumes the event stream using `for await`.
-actor StreamAnalyticsSubscriber {
+@MainActor
+final class StreamAnalyticsSubscriber {
     private let eventBus: EventBus
     private var streamTask: Task<Void, Never>?
 
@@ -119,15 +113,14 @@ actor StreamAnalyticsSubscriber {
             return
         }
 
-        streamTask = Task { [eventBus] in
-            let events = eventBus.stream(
-                UserDidLoginEvent.self,
-                delivery: .immediate,
-                bufferingPolicy: .bufferingNewest(50)
-            )
+        let stream = eventBus.stream(
+            UserDidLoginEvent.self,
+            bufferingPolicy: .bufferingNewest(50)
+        )
 
-            for await event in events {
-                self.track(event)
+        streamTask = Task { @MainActor [weak self] in
+            for await event in stream {
+                self?.lastEvent = event
             }
         }
     }
@@ -136,9 +129,5 @@ actor StreamAnalyticsSubscriber {
     func stop() {
         streamTask?.cancel()
         streamTask = nil
-    }
-
-    private func track(_ event: UserDidLoginEvent) {
-        lastEvent = event
     }
 }

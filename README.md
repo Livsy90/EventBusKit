@@ -46,11 +46,6 @@ struct AppReadyEvent: EventBusEvent {
 }
 ```
 
-### Delivery Modes
-
-- `.immediate`: invokes the handler synchronously during `publish(_:)` after the lock is released. This does not imply `MainActor`.
-- `.mainActor`: schedules delivery asynchronously on `MainActor`.
-
 ### Subscriptions
 
 - Every `subscribe(...)` call creates a new independent subscription.
@@ -58,12 +53,6 @@ struct AppReadyEvent: EventBusEvent {
 - `SubscriptionToken.cancel()` cancels one specific subscription.
 - `unsubscribe(owner:from:)` removes all subscriptions for one owner and event type.
 - `unsubscribeAll(for:)` removes all subscriptions for one owner across all event types.
-
-### Async Handlers
-
-- Async overloads launch handlers in fire-and-forget `Task`.
-- `publish(_:)` does not await async handlers.
-- Cancelling a token prevents new deliveries, but does not necessarily cancel an async handler that has already started.
 
 ### AsyncStream
 
@@ -82,14 +71,13 @@ Task {
 ## API Overview
 
 - `publish(_:)`
-- `publishAsync(_:priority:)`
 - `subscribe(...)` with `(Owner, Event)` handler
 - `subscribe(...)` with `Event`-only handler
 - `subscribeOnce(...)`
 - `subscribeOnMain(...)`
 - `unsubscribe(owner:from:)`
 - `unsubscribeAll(for:)`
-- `stream(_:delivery:bufferingPolicy:)`
+- `stream(_:bufferingPolicy:)`
 
 ## Thread Safety
 

@@ -2,15 +2,16 @@ import Foundation
 import Testing
 @testable import EventBusKit
 
-private struct IntEvent: EventBusEvent, Sendable {
+private struct IntEvent: EventBusEvent {
     let value: Int
 }
 
-private struct StringEvent: EventBusEvent, Sendable {
+private struct StringEvent: EventBusEvent {
     let value: String
 }
 
-private final class TestOwner: @unchecked Sendable {}
+private final class TestOwner {}
+private final class PlainOwner {}
 @MainActor
 private final class MainActorOwner {
     var values: [Int] = []
@@ -159,36 +160,6 @@ func tokenCancelsOnlyOneSubscription() async {
 }
 
 @Test
-func subscribeOnceMainThreadDeliversOnlyOnceAcrossQueuedPublishes() async {
-    let bus = EventBus()
-    let owner = TestOwner()
-    let recorder = Recorder()
-
-    _ = bus.subscribeOnce(owner: owner, to: IntEvent.self, delivery: .mainActor) { _, event in
-        recorder.append(event.value)
-    }
-
-    await withTaskGroup(of: Void.self) { group in
-        group.addTask {
-            bus.publish(IntEvent(value: 1))
-        }
-        group.addTask {
-            bus.publish(IntEvent(value: 2))
-        }
-        group.addTask {
-            bus.publish(IntEvent(value: 3))
-        }
-    }
-
-    let delivered = await eventually {
-        recorder.count() == 1
-    }
-
-    #expect(delivered)
-    #expect(recorder.count() == 1)
-}
-
-@Test
 func unsubscribeStopsDelivery() async {
     let bus = EventBus()
     let owner = TestOwner()
@@ -275,51 +246,18 @@ func streamEmitsPublishedEvents() async {
     #expect(received == [3, 4])
 }
 @Test
-func mainThreadDeliveryRunsHandlerOnMainThread() async {
+func subscribeSupportsNonSendableOwner() async {
     let bus = EventBus()
-    let owner = TestOwner()
+    let owner = PlainOwner()
     let recorder = Recorder()
-    let isMainThread = BoolBox()
 
-    _ = bus.subscribe(owner: owner, to: IntEvent.self, delivery: .mainActor) { _, event in
-        isMainThread.set(Thread.isMainThread)
+    _ = bus.subscribe(owner: owner, to: IntEvent.self) { _, event in
         recorder.append(event.value)
     }
 
     bus.publish(IntEvent(value: 1))
 
-    let delivered = await eventually {
-        recorder.count() == 1
-    }
-
-    #expect(delivered)
-    #expect(isMainThread.get())
-}
-
-@Test
-func mainThreadAsyncEventOnlyDeliveryRunsHandlerOnMainThread() async {
-    let bus = EventBus()
-    let owner = TestOwner()
-    let recorder = Recorder()
-    let isMainThread = BoolBox()
-
-    _ = bus.subscribe(
-        owner: owner,
-        to: IntEvent.self,
-        delivery: .mainActor
-    ) { event in
-        isMainThread.set(Thread.isMainThread)
-        recorder.append(event.value)
-    }
-
-    bus.publish(IntEvent(value: 2))
-
-    let delivered = await eventually {
-        recorder.count() == 1
-    }
-
-    #expect(delivered)
-    #expect(isMainThread.get())
+    #expect(recorder.snapshot() == [1])
 }
 
 @Test
@@ -389,9 +327,11 @@ func tokenCancelIsIdempotent() async {
 func subscribeOnMainSupportsNonSendableOwner() async {
     let bus = EventBus()
     let delivered = BoolBox()
+    let isMainThread = BoolBox()
     let owner = await MainActor.run { MainActorOwner() }
     let token = await MainActor.run {
         bus.subscribeOnMain(owner: owner, to: IntEvent.self) { owner, event in
+            isMainThread.set(Thread.isMainThread)
             owner.values.append(event.value)
             delivered.set(true)
         }
@@ -400,6 +340,7 @@ func subscribeOnMainSupportsNonSendableOwner() async {
     bus.publish(IntEvent(value: 8))
 
     #expect(await eventually { delivered.get() })
+    #expect(isMainThread.get())
     #expect(await MainActor.run { owner.values == [8] })
     token.cancel()
 }
